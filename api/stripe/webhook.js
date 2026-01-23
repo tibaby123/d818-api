@@ -11,6 +11,8 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 export default async function handler(req, res) {
+  console.log("🔔 Webhook received");
+  
   if (req.method !== "POST") {
     return res.status(405).end("Method Not Allowed");
   }
@@ -19,7 +21,6 @@ export default async function handler(req, res) {
   let event;
 
   try {
-    // Get raw body for Stripe signature verification
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const rawBody = Buffer.concat(chunks).toString("utf8");
@@ -29,47 +30,62 @@ export default async function handler(req, res) {
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
+    
+    console.log("✅ Signature verified");
+    console.log("📦 Event type:", event.type);
+    console.log("🆔 Event ID:", event.id);
+    
   } catch (err) {
-    console.error("Webhook signature verification failed:", err.message);
+    console.error("❌ Webhook signature verification failed:", err.message);
     return res.status(400).json({ error: err.message });
   }
 
   try {
     if (event.type === "checkout.session.completed") {
+      console.log("💳 Processing checkout.session.completed");
+      
       const session = event.data.object;
+      console.log("Session ID:", session.id);
+      console.log("Payment status:", session.payment_status);
 
-      // Only fulfil if actually paid
       if (session.payment_status !== "paid") {
+        console.log("⚠️ Payment not completed, skipping");
         return res.json({ received: true });
       }
 
       const orderId = session.client_reference_id || session.metadata?.orderId;
       const totalPaid = (session.amount_total || 0) / 100;
+      
+      console.log("📝 Order ID:", orderId);
+      console.log("💰 Total paid: £", totalPaid);
 
-      // ✅ De-dupe: use PaymentIntent metadata so Stripe retries don't re-send emails
+      // De-dupe check
       const paymentIntentId = session.payment_intent;
       if (paymentIntentId) {
         const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
         if (pi?.metadata?.d818_email_sent === "true") {
           console.log("ℹ️ Emails already sent for this PaymentIntent. Skipping.");
-          // Still send WhatsApp if you want, or skip as well
           await sendPaymentConfirmation(orderId, totalPaid);
           return res.json({ received: true });
         }
       }
 
-      // Pull line items from Stripe Checkout
+      // Pull line items
+      console.log("📋 Fetching line items...");
       const lineItems = await stripe.checkout.sessions.listLineItems(session.id);
+      console.log("Found", lineItems.data.length, "line items");
 
-      // Compute delivery fee from line items if you added it as "Delivery fee"
+      // Compute delivery fee
       const deliveryFeeItem = lineItems.data.find(
         (li) => (li.description || "").toLowerCase().trim() === "delivery fee"
       );
       const deliveryFee = deliveryFeeItem ? (deliveryFeeItem.amount_total || 0) / 100 : 0;
-
       const subtotal = Math.max(0, totalPaid - deliveryFee);
 
-      // Build items list (exclude delivery fee from item list so your email shows it separately)
+      console.log("💵 Subtotal: £", subtotal);
+      console.log("🚚 Delivery fee: £", deliveryFee);
+
+      // Build items list
       const items = lineItems.data
         .filter((li) => (li.description || "").toLowerCase().trim() !== "delivery fee")
         .map((li) => {
@@ -80,11 +96,13 @@ export default async function handler(req, res) {
           return {
             name: li.description,
             quantity: qty,
-            price: Number(unit.toFixed(2)), // IMPORTANT: number, because template does item.price * quantity
+            price: Number(unit.toFixed(2)),
           };
         });
 
-      // Build an "order" object that matches your orders.js template fields
+      console.log("🍽️ Order items:", items.length);
+
+      // Build order object
       const order = {
         orderId,
         user: {
@@ -111,16 +129,18 @@ export default async function handler(req, res) {
           session.metadata?.withinRadius === "true" ||
           session.metadata?.withinRadius === true ||
           session.metadata?.withinRadius === "1" ||
-          true, // default true if not provided
+          true,
         timestamp: new Date().toISOString(),
-
-        // Payment fields used by your template
         paymentMethod: "stripe",
         paymentId: paymentIntentId || session.id,
         paymentStatus: "paid",
       };
 
-      // ✅ 1) Restaurant email — EXACT template copied from orders.js
+      console.log("👤 Customer:", order.user.name, order.user.email);
+      console.log("🚚 Delivery option:", order.deliveryOption);
+
+      // Send restaurant email
+      console.log("📧 Sending restaurant email to info@d818.co.uk...");
       await resend.emails.send({
         from: "D818 Orders <onboarding@resend.dev>",
         to: "info@d818.co.uk",
@@ -128,9 +148,11 @@ export default async function handler(req, res) {
         subject: `🍽️ New Order: ${order.orderId}`,
         html: restaurantEmailHtml(order),
       });
+      console.log("✅ Restaurant email sent");
 
-      // ✅ 2) Customer email — EXACT template copied from orders.js
+      // Send customer email
       if (order.user.email) {
+        console.log("📧 Sending customer email to", order.user.email);
         await resend.emails.send({
           from: "D818 Restaurant <onboarding@resend.dev>",
           to: order.user.email,
@@ -138,26 +160,38 @@ export default async function handler(req, res) {
           subject: `✅ Order Confirmation - ${order.orderId}`,
           html: customerEmailHtml(order),
         });
+        console.log("✅ Customer email sent");
+      } else {
+        console.log("⚠️ No customer email provided");
       }
 
-      // Mark as sent so retries don't duplicate emails
+      // Mark as sent
       if (paymentIntentId) {
+        console.log("🏷️ Marking PaymentIntent as processed...");
         await stripe.paymentIntents.update(paymentIntentId, {
           metadata: {
             d818_email_sent: "true",
             d818_order_id: String(orderId || ""),
           },
         });
+        console.log("✅ PaymentIntent marked as processed");
       }
 
-      // WhatsApp confirmation (keep)
+      // WhatsApp confirmation
+      console.log("📱 Sending WhatsApp confirmation...");
       await sendPaymentConfirmation(orderId, totalPaid);
+      console.log("✅ WhatsApp sent");
+      
+      console.log("🎉 Order processed successfully:", orderId);
+    } else {
+      console.log("ℹ️ Unhandled event type:", event.type);
     }
 
     return res.json({ received: true });
   } catch (err) {
-    console.error("Webhook handler error:", err);
-    // Return 500 so Stripe retries (since this is your reliable fulfilment path)
+    console.error("❌ Webhook handler error:", err);
+    console.error("Error details:", err.message);
+    console.error("Stack trace:", err.stack);
     return res.status(500).json({ error: "Webhook handler failed" });
   }
 }
