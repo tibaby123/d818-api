@@ -142,7 +142,7 @@ export default async function handler(req, res) {
       // Send restaurant email
       console.log("📧 Sending restaurant email to info@d818.co.uk...");
       await resend.emails.send({
-        from: "D818 Orders <onboarding@resend.dev>",
+        from: "D818 Orders <info@d818.co.uk>",
         to: "info@d818.co.uk",
         replyTo: order.user.email || undefined,
         subject: `🍽️ New Order: ${order.orderId}`,
@@ -154,7 +154,7 @@ export default async function handler(req, res) {
       if (order.user.email) {
         console.log("📧 Sending customer email to", order.user.email);
         await resend.emails.send({
-          from: "D818 Restaurant <onboarding@resend.dev>",
+          from: "D818 Orders <info@d818.co.uk>",  // ✅ Changed from onboarding@resend.dev
           to: order.user.email,
           replyTo: "info@d818.co.uk",
           subject: `✅ Order Confirmation - ${order.orderId}`,
