@@ -23,6 +23,7 @@ export default async function handler(req, res) {
       const name = String(it.name || "Item");
       const qty = Number(it.quantity || 0);
       const price = Number(it.price || 0);
+      
 
       if (!Number.isFinite(qty) || qty <= 0) throw new Error("Invalid item quantity");
       if (!Number.isFinite(price) || price <= 0) throw new Error("Invalid item price");
